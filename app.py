@@ -1,6 +1,9 @@
 from datetime import date
 import streamlit as st
 from pawpal_system import Pet, Task, Owner, Scheduler, save_to_json, load_from_json
+from vet_rag import summarize_visit, claude_available, extract_pdf_text
+from vet_agent import VetCareAgent, save_plan, load_plan
+from lab_interpreter import interpret_lab_panel
 
 st.set_page_config(page_title="PawPal+", page_icon="🐾", layout="centered")
 
@@ -34,6 +37,9 @@ if "pets" not in st.session_state:
     _saved_pets, _saved_tasks = load_from_json()
     st.session_state.pets = _saved_pets
     st.session_state.tasks = _saved_tasks
+    _saved_plan, _saved_audit = load_plan()
+    st.session_state.vet_plan = _saved_plan
+    st.session_state.vet_audit = _saved_audit
 
 with st.form("add_pet_form", clear_on_submit=True):
     st.markdown("**Add a pet**")
@@ -184,6 +190,161 @@ else:
 
 st.divider()
 
+# --- Vet Records (RAG) ---
+st.subheader("🩺 Vet Records & AI Summary")
+st.caption(
+    "Paste veterinary notes/history below. PawPal+ retrieves the relevant sections "
+    "and produces a structured summary: labs, contraindications, diagnoses with "
+    "reference links, food and prescription ordering links."
+    + ("" if claude_available() else
+       " (Claude API credentials not detected — using the offline extractor.)")
+)
+
+if "vet_plan" not in st.session_state:
+    st.session_state.vet_plan, st.session_state.vet_audit = load_plan()
+if "vet_summary" not in st.session_state:
+    st.session_state.vet_summary = None
+
+vet_pet = st.selectbox(
+    "Which pet are these notes for?",
+    options=pet_names if pet_names else ["Add a pet first"],
+    key="vet_notes_pet",
+)
+uploaded = st.file_uploader("Upload lab reports / records (PDF or text)",
+                            type=["pdf", "txt"], accept_multiple_files=True)
+extracted = ""
+if uploaded:
+    parts = []
+    for f in uploaded:
+        if f.name.lower().endswith(".pdf"):
+            text = extract_pdf_text(f)
+            if not text:
+                st.warning(f"Couldn't read text from {f.name}. Install `pypdf`, or paste the text below.")
+            parts.append(text)
+        else:
+            parts.append(f.read().decode("utf-8", errors="ignore"))
+    extracted = "\n\n".join(p for p in parts if p)
+    if extracted:
+        st.caption(f"Extracted {len(extracted)} characters from {len(uploaded)} file(s).")
+
+vet_notes = st.text_area("Veterinary notes / visit history", value=extracted, height=220,
+                         placeholder="Paste the vet's visit notes here, or upload files above...")
+
+if st.button("Analyze vet notes", type="primary", disabled=not pet_names):
+    if not vet_notes.strip():
+        st.warning("Paste or upload some vet notes first.")
+    else:
+        with st.spinner("Summarizing visit notes..."):
+            st.session_state.vet_summary = summarize_visit(vet_notes, pet_name=vet_pet)
+        st.success(
+            f"Notes analyzed ({'Claude' if st.session_state.vet_summary.generated_by == 'claude' else 'offline extractor'})."
+        )
+
+vs = st.session_state.vet_summary
+if vs is not None:
+    st.markdown("### Visit Summary")
+    if vs.visit_date:
+        st.caption(f"Visit date: {vs.visit_date}")
+    st.write(vs.summary or "—")
+
+    if vs.diagnoses:
+        st.markdown("**Diagnosed conditions**")
+        for cond in vs.diagnoses:
+            st.markdown(
+                f"- **{cond.name}** — {cond.summary or 'see references'} "
+                f"([Wikipedia]({cond.wiki_url}) · [Merck Vet Manual]({cond.reference_url}))"
+            )
+
+    if vs.lab_results:
+        st.markdown("**Laboratory results & interpretation**")
+        if vs.lab_summary:
+            st.info(vs.lab_summary)
+        _flag_icon = {"normal": "✅", "high": "🔺", "low": "🔻", "abnormal": "⚠️", "unknown": "❔"}
+        st.table([
+            {"": _flag_icon.get(l.flag, ""), "Test": l.name, "Value": l.value,
+             "Unit": l.unit, "Reference": l.reference_range,
+             "Interpretation": l.flag.upper() + (f" — {l.note}" if l.note else "")}
+            for l in vs.lab_results
+        ])
+        abnormal = [l for l in vs.lab_results if l.flag in ("high", "low", "abnormal")]
+        if not abnormal:
+            st.success("All interpreted lab values are within their reference ranges.")
+
+    if vs.contraindications:
+        st.markdown("**Contraindications**")
+        for c in vs.contraindications:
+            st.warning(f"**{c.finding}** → avoid {c.avoid}. {c.reason}")
+
+    if vs.foods:
+        st.markdown("**Recommended food formulations**")
+        for f in vs.foods:
+            links = " · ".join(f"[{store}]({url})" for store, url in f.order_links.items())
+            st.markdown(f"- **{f.product}** — {f.reason} ({links})")
+
+    if vs.prescriptions:
+        st.markdown("**Prescriptions**")
+        st.table([
+            {"Medication": p.name, "Dose": p.dose, "Frequency": p.frequency,
+             "Duration": p.duration, "Est. price": p.price_estimate or "—",
+             "Refills": p.refills or "—",
+             "Pickup needed": "Yes" if p.pickup_required else "No"}
+            for p in vs.prescriptions
+        ])
+        for p in vs.prescriptions:
+            links = " · ".join(f"[{store}]({url})" for store, url in p.order_links.items())
+            st.markdown(f"- Order **{p.name}**: {links}")
+
+    if vs.vaccines:
+        st.markdown("**Vaccines**")
+        st.table([
+            {"Vaccine": v.name, "Given": v.date_given or "—", "Next due": v.next_due or "—"}
+            for v in vs.vaccines
+        ])
+
+    if vs.follow_up:
+        st.info(f"Follow-up: {vs.follow_up}")
+
+st.divider()
+
+# --- Vet Care Agent ---
+st.subheader("🤖 Vet Care Agent")
+st.caption(
+    "The agent turns the vet summary into scheduled tasks (prescription pickup, "
+    "medication doses, vaccine boosters, diet changes, follow-ups) and monitors the "
+    "schedule — vet-managed tasks that are deleted or moved off the vet's plan are "
+    "restored automatically. It never touches tasks you created yourself."
+)
+
+agent = VetCareAgent(availability=availability)
+
+if vs is not None and st.button("Apply care plan to schedule"):
+    new_plan = agent.build_plan(vs, pet_name=vet_pet)
+    # merge: replace this pet's old plan entries, keep other pets' plans
+    kept = [p for p in st.session_state.vet_plan if p.get("pet") != vet_pet]
+    st.session_state.vet_plan = kept + new_plan
+    st.success(f"Care plan for {vet_pet} added: {len(new_plan)} vet-managed task(s).")
+
+# Constant monitoring: reconcile on every rerun when a plan exists.
+if st.session_state.vet_plan:
+    synced_tasks, actions = agent.sync(st.session_state.tasks, st.session_state.vet_plan)
+    if actions:
+        st.session_state.tasks = synced_tasks
+        st.session_state.vet_audit.extend(a.to_dict() for a in actions)
+        save_to_json(st.session_state.pets, st.session_state.tasks)
+    save_plan(st.session_state.vet_plan, st.session_state.vet_audit)
+    for a in actions:
+        st.info(f"Agent {a.action}: **{a.task_title}** — {a.reason}")
+
+if st.session_state.vet_audit:
+    with st.expander(f"Agent audit log ({len(st.session_state.vet_audit)} action(s))", expanded=False):
+        st.table([
+            {"When": a["timestamp"], "Action": a["action"],
+             "Task": a["task_title"], "Pet": a["pet"], "Why": a["reason"]}
+            for a in reversed(st.session_state.vet_audit[-25:])
+        ])
+
+st.divider()
+
 # --- Generate Schedule ---
 st.subheader("Generate Schedule")
 
@@ -227,6 +388,9 @@ if st.button("Generate schedule", type="primary"):
                 duration=t["duration"],
                 urgency=t["urgency"],
                 pet=pet_objects.get(t["pet"]),
+                category=t.get("category", "general"),
+                source=t.get("source", "owner"),
+                dose=t.get("dose", ""),
             )
             owner.add_task(task)
 

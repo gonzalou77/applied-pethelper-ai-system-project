@@ -1,0 +1,74 @@
+%% PawPal+ — RAG + Agentic Workflow (data flow, components, human/test checkpoints)
+flowchart TD
+
+    %% ---------- INPUT ----------
+    subgraph INPUT["1 - Input"]
+        A1["Vet notes / lab reports<br/>(PDF or text upload)"]
+        A2["Owner + pet + task data<br/>(Streamlit session)"]
+    end
+
+    %% ---------- RETRIEVER (RAG) ----------
+    subgraph RAG["2 - Retriever (RAG)"]
+        R1["chunk_notes()<br/>split into passages"]
+        R2["NotesIndex (TF-IDF)<br/>retrieve top chunks per aspect"]
+        R3["build_context()<br/>compact relevant context"]
+    end
+
+    %% ---------- AI PROCESSING ----------
+    subgraph AI["3 - AI Summarizer (Agent/LLM)"]
+        G1{"ANTHROPIC_API_KEY<br/>available?"}
+        G2["Claude claude-opus-5<br/>strict JSON schema"]
+        G3["Offline heuristic<br/>extractor (fallback)"]
+        G4["VisitSummary<br/>(structured output)"]
+    end
+
+    %% ---------- EVALUATOR ----------
+    subgraph EVAL["4 - Evaluator (deterministic)"]
+        E1["lab_interpreter<br/>value vs reference range"]
+        E2["flags + clinical notes<br/>+ lab_summary"]
+        E3["contraindication rules"]
+    end
+
+    %% ---------- AGENT ----------
+    subgraph AGENT["5 - Vet Care Agent (agentic)"]
+        C1["build_plan()<br/>pickup / doses / vaccines / diet"]
+        C2["sync() monitor loop<br/>restore + correct drift"]
+        C3["guardrail: only agent-owned<br/>vet tasks; PRN not scheduled"]
+    end
+
+    %% ---------- OUTPUT ----------
+    subgraph OUTPUT["6 - Output"]
+        O1["Scheduler<br/>daily plan + conflicts"]
+        O2["Interpreted lab table<br/>+ summary + links"]
+        O3["Audit log<br/>(every agent action + reason)"]
+    end
+
+    %% ---------- HUMAN / TESTING CHECKPOINTS ----------
+    H1(["HUMAN: owner reviews summary<br/>& approves care plan"])
+    H2(["HUMAN: owner reads audit log,<br/>edits owner-owned tasks"])
+    T1[["TEST: pytest suite - 134 tests<br/>labs, extraction, sync guardrails"]]
+
+    %% ---------- DATA FLOW ----------
+    A1 --> R1 --> R2 --> R3 --> G1
+    G1 -- yes --> G2 --> G4
+    G1 -- no --> G3 --> G4
+    G4 --> E1 --> E2 --> E3
+    E3 --> H1
+    A2 --> C1
+    H1 -- approved --> C1
+    C1 --> C2 --> C3 --> O1
+    E2 --> O2
+    C2 --> O3
+    O1 --> H2
+    O3 --> H2
+    H2 -- schedule change --> C2
+
+    %% ---------- VERIFICATION ----------
+    T1 -.verifies.-> R2
+    T1 -.verifies.-> E1
+    T1 -.verifies.-> C2
+
+    classDef human fill:#ffe9c7,stroke:#d68910,color:#000
+    classDef test fill:#d6eaf8,stroke:#2471a3,color:#000
+    class H1,H2 human
+    class T1 test

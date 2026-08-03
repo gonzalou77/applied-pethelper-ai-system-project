@@ -66,6 +66,9 @@ class Task:
     owner: Optional[Owner] = field(default=None, repr=False)
     pet: Optional[Pet] = field(default=None, repr=False)
     due_date: date = field(default_factory=date.today)
+    category: str = "general"   # "general" | "medication" | "pickup" | "vaccine" | "vet_visit" | "diet"
+    source: str = "owner"       # "owner" (user-created) | "agent" (vet care agent)
+    dose: str = ""              # e.g. "5 mg twice daily" — populated on medication tasks
 
     def mark_done(self) -> None:
         """Set the task status to done."""
@@ -112,6 +115,9 @@ class Task:
             owner=self.owner,
             pet=self.pet,
             due_date=next_date,
+            category=self.category,
+            source=self.source,
+            dose=self.dose,
         )
 
 
