@@ -281,6 +281,11 @@ def parse_lab_line(line: str) -> Optional[LabFinding]:
     # that look like reference ranges — exclude them up front.
     if _MED_HINT_RE.search(line):
         return None
+    # address / footer lines (e.g. "2917 Old US 231 South, Lafayette, IN 47909 |
+    # 765 474 - 2454") can look like a value + range; the "|" separator and a
+    # phone number never appear in a real lab row.
+    if "|" in line:
+        return None
     # pull a trailing explicit flag word off first (e.g. "... HIGH")
     explicit_flag = ""
     # require whitespace (or start) before the flag so unit letters like the
@@ -299,7 +304,9 @@ def parse_lab_line(line: str) -> Optional[LabFinding]:
         return None
 
     name = " ".join(tokens[:idx]).strip(" :")
-    if not name or len(name.split()) > 5:   # analyte names are short
+    # analyte names are short and start with a letter — a leading digit means
+    # the "name" is really a street number / address, not a lab test.
+    if not name or not name[0].isalpha() or len(name.split()) > 5:
         return None
     value = tokens[idx]
     ref, unit = _consume_ref_and_unit(tokens[idx + 1:])

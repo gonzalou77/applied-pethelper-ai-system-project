@@ -1,5 +1,15 @@
 __pycache__/
+*.pyc
 .venv/
 .venv_new/
+venv/
 .pytest_cache/
 .DS_Store
+
+# Runtime data — may contain a real user's pet/owner info
+data.json
+vet_plan.json
+
+# Local vet-record uploads / scratch
+*.pdf
+!diagrams/*.pdf

@@ -388,6 +388,22 @@ class TestLabLineParsing:
         assert parse_lab_line("K9 Rabies 27-Feb-2028") is None
         assert parse_lab_line("5y 6m 14.06 kg 31 lb 20-May-2026") is None
 
+    def test_rejects_hospital_address_footer(self):
+        # phone "474 - 2454" looks like a reference range; must not become a lab
+        assert parse_lab_line(
+            "2917 Old US 231 South, Lafayette, IN 47909 | 765 474 - 2454") is None
+        assert parse_lab_line("231 South, Lafayette, IN 47909 | 765") is None
+        assert parse_lab_line("474 - 2454") is None
+
+    def test_footer_not_flagged_in_full_panel(self):
+        text = (REAL_PANEL
+                + "\nVCA Paw Prints Animal Hospital"
+                + "\n2917 Old US 231 South, Lafayette, IN 47909 | 765 474 - 2454\n")
+        panel = interpret_lab_panel(text)
+        assert all("2917" not in f.name and "Old US" not in f.name
+                   for f in panel.findings)
+        assert len(panel.abnormal()) == 1  # still just the proteinuria
+
     def test_high_value_gets_clinical_note(self):
         f = parse_lab_line("ALT (SGPT) 210 12 - 118 IU/L")
         assert f.flag == "high" and "liver" in f.note.lower()
